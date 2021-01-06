@@ -1,7 +1,7 @@
 .PHONY: all
 
 CC = gcc
-CFLAGS = -fPIC -shared
+CFLAGS = -fPIC -shared --std=c99 -Wall -Wextra -pedantic -Werror
 # CFLAGS := $(CFLAGS) -DDEBUG=1 -g
 
 all: fn.so libfn.so fn
