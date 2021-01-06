@@ -232,7 +232,7 @@ static void create_function(sqlite3_context* ctx, int argc, sqlite3_value** argv
 	/* get arguments */
 	if(argc != 4) fail(ctx, "Wrong number of arguments");
 	typecheck(ctx, argv[0], SQLITE_TEXT, "Function name must be TEXT");
-	typecheck(ctx, argv[1], SQLITE_INTEGER, "Function argc must be TEXT");
+	typecheck(ctx, argv[1], SQLITE_INTEGER, "Function argc must be INTEGER");
 	typecheck(ctx, argv[2], SQLITE_TEXT, "Function flags must be TEXT");
 	typecheck(ctx, argv[3], SQLITE_TEXT, "Function code must be TEXT");
 	sqlite3* fn_db = sqlite3_context_db_handle(ctx);
