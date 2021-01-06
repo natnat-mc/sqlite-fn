@@ -12,6 +12,7 @@ SQLITE_EXTENSION_INIT1
 #define debug DEBUG
 
 #define fail(ctx, msg) do{ sqlite3_result_error(ctx, msg, -1); if(debug) fprintf(stderr, "%s, %d: %s: %s\n", __func__, __LINE__, msg, sqlite3_errmsg(sqlite3_context_db_handle(ctx))); return; } while(0)
+#define typecheck(ctx, arg, type, msg) do { if(sqlite3_value_type(arg) != type) fail(ctx, msg); } while(0)
 
 /**
  * global utilities
@@ -105,11 +106,14 @@ static sqlite3_stmt* fn_stmt(sql_fn* fn, sqlite3* db) { /* get statement for fun
  * created function body
  */
 static void sql_function(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+	/* get stuff */
 	sqlite3* db = sqlite3_context_db_handle(ctx);
 	sql_fn* fn = sqlite3_user_data(ctx);
 	if(argc != fn->argc) fail(ctx, "Wrong number of arguments");
 	sqlite3_stmt* stmt = fn_stmt(fn, db);
 	if(!stmt) fail(ctx, "Failed to allocate a statement");
+
+	/* do stuff */
 	for(int i=1; i<=fn->argc; i++) if(sqlite3_bind_value(stmt, i, argv[i-1]) != SQLITE_OK) fail(ctx, "Failed to bind argument");
 	if(sqlite3_step(stmt) != SQLITE_ROW) {
 		sqlite3_reset(stmt);
@@ -117,7 +121,7 @@ static void sql_function(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
 	}
 	sqlite3_value* rst = sqlite3_column_value(stmt, 0);
 	if(!rst) fail(ctx, "No result value");
-	if(debug) switch(sqlite3_column_type(stmt, 1)) {
+	if(debug) switch(sqlite3_column_type(stmt, 0)) {
 		case SQLITE_INTEGER: printf("->int\n"); break;
 		case SQLITE_FLOAT: printf("->float\n"); break;
 		case SQLITE_TEXT: printf("->text\n"); break;
@@ -130,15 +134,107 @@ static void sql_function(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
 }
 
 /**
+ * created vararg
+ */
+static void sql_vararg(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+	/* special cases */
+	if(argc == 0) {
+		sqlite3_result_null(ctx);
+		return;
+	} else if(argc == 1) {
+		sqlite3_result_value(ctx, argv[0]);
+		return;
+	}
+
+	/* get stuff */
+	sqlite3* db = sqlite3_context_db_handle(ctx);
+	sql_fn* fn = sqlite3_user_data(ctx);
+	sqlite3_stmt* stmt = fn_stmt(fn, db);
+	if(!stmt) fail(ctx, "Failed to allocate a statement");
+
+	/* do stuff */
+	sqlite3_value* acc = sqlite3_value_dup(argv[0]);
+	if(!acc) fail(ctx, "Failed to duplicate value");
+	for(int i=1; i<argc; i++) {
+		if(sqlite3_bind_value(stmt, 1, acc) != SQLITE_OK) {
+			sqlite3_value_free(acc);
+			fail(ctx, "Failed to bind accumulator");
+		}
+		if(sqlite3_bind_value(stmt, 2, argv[i]) != SQLITE_OK) {
+			sqlite3_value_free(acc);
+			fail(ctx, "Failed to bind current");
+		}
+		if(sqlite3_step(stmt) != SQLITE_ROW) {
+			sqlite3_value_free(acc);
+			sqlite3_reset(stmt);
+			fail(ctx, "Did not return a row");
+		}
+		sqlite3_value_free(acc);
+		acc = sqlite3_value_dup(sqlite3_column_value(stmt, 0));
+		sqlite3_reset(stmt);
+		if(!acc) fail(ctx, "Failed to duplicate value");
+	}
+	sqlite3_result_value(ctx, acc);
+	sqlite3_value_free(acc);
+}
+
+/**
+ * created reducer step
+ */
+static void sql_reducer_step(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+	/* validation */
+	if(argc != 1) fail(ctx, "Accumulator reducer step takes one argument");
+
+	/* get stuff */
+	sqlite3* db = sqlite3_context_db_handle(ctx);
+	sql_fn* fn = sqlite3_user_data(ctx);
+	sqlite3_value** accp = sqlite3_aggregate_context(ctx, sizeof(sqlite3_value*));
+	if(!accp) fail(ctx, "Failed to allocate aggregate context");
+	
+	/* special case */
+	if(!*accp) {
+		*accp = sqlite3_value_dup(argv[0]);
+		if(!*accp) fail(ctx, "Failed to duplicate value");
+	}
+
+	/* do stuff */
+	sqlite3_stmt* stmt = fn_stmt(fn, db);
+	if(!stmt) fail(ctx, "Failed to allocate a statement");
+	if(sqlite3_bind_value(stmt, 1, *accp) != SQLITE_OK) fail(ctx, "Failed to bind accumulator");
+	sqlite3_value_free(*accp);
+	*accp = NULL;
+	if(sqlite3_bind_value(stmt, 2, argv[0]) != SQLITE_OK) fail(ctx, "Failed to bind current");
+	if(sqlite3_step(stmt) != SQLITE_ROW) {
+		sqlite3_reset(stmt);
+		fail(ctx, "Did not return a row");
+	}
+	*accp = sqlite3_value_dup(sqlite3_column_value(stmt, 0));
+	if(!*accp) fail(ctx, "Failed to duplicate value");
+}
+
+/**
+ * created reducer final
+ */
+static void sql_reducer_final(sqlite3_context* ctx) {
+	sqlite3_value** accp = sqlite3_aggregate_context(ctx, 0);
+	if(!accp || !*accp) {
+		sqlite3_result_null(ctx);
+	} else {
+		sqlite3_result_value(ctx, *accp);
+		sqlite3_value_free(*accp);
+	}
+}
+
+/**
  * CREATE_FUNCTION(name, nargs, flags, code)
  */
 static void create_function(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
 	/* get arguments */
 	if(argc != 4) fail(ctx, "Wrong number of arguments");
-	if(sqlite3_value_type(argv[0]) != SQLITE_TEXT) fail(ctx, "Function name must be TEXT");
-	if(sqlite3_value_type(argv[1]) != SQLITE_INTEGER) fail(ctx, "Function argc must be INTEGER");
-	if(sqlite3_value_type(argv[2]) != SQLITE_TEXT) fail(ctx, "Function flags must be TEXT");
-	if(sqlite3_value_type(argv[3]) != SQLITE_TEXT) fail(ctx, "Function code must be TEXT");
+	typecheck(ctx, argv[0], SQLITE_TEXT, "Function name must be TEXT");
+	typecheck(ctx, argv[1], SQLITE_INTEGER, "Function argc must be TEXT");
+	typecheck(ctx, argv[2], SQLITE_TEXT, "Function flags must be TEXT");
+	typecheck(ctx, argv[3], SQLITE_TEXT, "Function code must be TEXT");
 	sqlite3* fn_db = sqlite3_context_db_handle(ctx);
 	const char* fn_name = (const char*) sqlite3_value_text(argv[0]);
 	const int fn_argc = sqlite3_value_int(argv[1]);
@@ -185,10 +281,10 @@ static void create_function(sqlite3_context* ctx, int argc, sqlite3_value** argv
 static void create_function_v2(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
 	/* get arguments */
 	if(argc < 3) fail(ctx, "Not enough arguments");
-	if(sqlite3_value_type(argv[0]) != SQLITE_TEXT) fail(ctx, "Function name must be TEXT");
-	if(sqlite3_value_type(argv[1]) != SQLITE_TEXT) fail(ctx, "Function flags must be TEXT");
-	if(sqlite3_value_type(argv[2]) != SQLITE_TEXT) fail(ctx, "Function code must be TEXT");
-	for(int i=3; i<argc; i++) if(sqlite3_value_type(argv[i]) != SQLITE_TEXT) fail(ctx, "Function argument names must be TEXT");
+	typecheck(ctx, argv[0], SQLITE_TEXT, "Function name must be TEXT");
+	typecheck(ctx, argv[1], SQLITE_TEXT, "Function flags must be TEXT");
+	typecheck(ctx, argv[2], SQLITE_TEXT, "Function code must be TEXT");
+	for(int i=3; i<argc; i++) typecheck(ctx, argv[i], SQLITE_TEXT, "Function argument names must be TEXT");
 	sqlite3* fn_db = sqlite3_context_db_handle(ctx);
 	const char* fn_name = (const char*) sqlite3_value_text(argv[0]);
 	const int fn_argc = argc-3;
@@ -218,7 +314,6 @@ static void create_function_v2(sqlite3_context* ctx, int argc, sqlite3_value** a
 	/* create function code */
 	char* fn_code = alloca(strlen(fn_code_s) + strlen(argstr) + strlen(valuestr) + 46);
 	sprintf(fn_code, "WITH a(%s) AS (VALUES(%s)) SELECT (%s) AS r FROM a", argstr, valuestr, fn_code_s);
-
 	if(debug) printf("Creating function %s with body %s\n", fn_name, fn_code);
 
 	/* create function struct */
@@ -227,6 +322,44 @@ static void create_function_v2(sqlite3_context* ctx, int argc, sqlite3_value** a
 
 	/* create function */
 	if(sqlite3_create_function_v2(fn_db, fn_name, fn_argc, fn_flags, fn, sql_function, NULL, NULL, (void (*)(void*)) fn_delete) != SQLITE_OK) fail(ctx, "Failed to create function");
+	sqlite3_result_null(ctx);
+}
+
+/**
+ * CREATE_REDUCER(name, flags, code[, accname, currname])
+ */
+static void create_reducer(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+	/* get arguments */
+	if(argc != 3 && argc != 5) fail(ctx, "Must use either 3 or 5 arguments");
+	typecheck(ctx, argv[0], SQLITE_TEXT, "Reducer name must be TEXT");
+	typecheck(ctx, argv[1], SQLITE_TEXT, "Reducer flags must be TEXT");
+	typecheck(ctx, argv[2], SQLITE_TEXT, "Reducer code must be TEXT");
+	if(argc == 5) {
+		typecheck(ctx, argv[3], SQLITE_TEXT, "Reducer accumulator name must be TEXT");
+		typecheck(ctx, argv[4], SQLITE_TEXT, "Reducer current name must be TEXT");
+	}
+	sqlite3* red_db = sqlite3_context_db_handle(ctx);
+	const char* red_name = (const char*) sqlite3_value_text(argv[0]);
+	const char* red_flags_s = (const char*) sqlite3_value_text(argv[1]);
+	const char* red_code_s = (const char*) sqlite3_value_text(argv[2]);
+	const char* red_accname = (argc == 5) ? (const char*) sqlite3_value_text(argv[3]) : "acc";
+	const char* red_currname = (argc == 5) ? (const char*) sqlite3_value_text(argv[4]) : "curr";
+
+	/* get flags */
+	int red_flags = _getflags(red_flags_s);
+
+	/* create function code */
+	char* red_code = alloca(strlen(red_code_s) + 54);
+	sprintf(red_code, "WITH a(%s,%s) AS (VALUES(?,?)) SELECT (%s) AS r FROM a", red_accname, red_currname, red_code_s);
+	if(debug) printf("Creating reducer %s with body %s\n", red_name, red_code);
+
+	/* create function struct */
+	sql_fn* fn = fn_create(red_code, 2);
+	if(!fn) fail(ctx, "Out of memory");
+
+	/* create vararg */
+	if(sqlite3_create_function_v2(red_db, red_name, -1, red_flags, fn, sql_vararg, NULL, NULL, (void (*)(void*)) fn_delete) != SQLITE_OK) fail(ctx, "Failed to create vararg");
+	if(sqlite3_create_function_v2(red_db, red_name, 1, red_flags, fn, NULL, sql_reducer_step, sql_reducer_final, (void (*)(void*)) fn_delete) != SQLITE_OK) fail(ctx, "Failed to create aggregate");
 	sqlite3_result_null(ctx);
 }
 
@@ -243,7 +376,8 @@ int sqlite3_fn_init(sqlite3 *db, char** errMsg, const sqlite3_api_routines *api)
 	SQLITE_EXTENSION_INIT2(api);
 
 	try(sqlite3_create_function_v2(db, "create_function", 4, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, create_function, NULL, NULL, NULL));
-	try(sqlite3_create_function_v2(db, "create_function_v2", 4, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, create_function_v2, NULL, NULL, NULL));
+	try(sqlite3_create_function_v2(db, "create_function_v2", -1, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, create_function_v2, NULL, NULL, NULL));
+	try(sqlite3_create_function_v2(db, "create_reducer", -1, SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, create_reducer, NULL, NULL, NULL));
 
 	return SQLITE_OK;
 }

@@ -1,4 +1,4 @@
-.PHONY: all
+.PHONY: all clean re
 
 CC = gcc
 CFLAGS = -fPIC -shared --std=c99 -Wall -Wextra -pedantic -Werror
@@ -7,6 +7,7 @@ CFLAGS = -fPIC -shared --std=c99 -Wall -Wextra -pedantic -Werror
 all: fn.so libfn.so fn
 clean:
 	rm -f fn.so libfn.so fn
+re: clean all
 
 fn.so: fn.c
 	$(CC) $(CFLAGS) $^ -o $@
